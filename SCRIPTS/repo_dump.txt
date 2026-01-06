@@ -1,0 +1,390 @@
+
+========== FILE: deprecated/setup_devtools.sh ==========
+#!/bin/bash
+
+BIN_DIR="$HOME/bin"
+COMMON_PROFILE="$HOME/.common_profile"
+
+echo "🔧 Setting up Termux DevTools (Shared Config)..."
+
+# 1. Create ~/bin if missing
+if [ ! -d "$BIN_DIR" ]; then
+    mkdir -p "$BIN_DIR"
+fi
+
+# 2. Compile repo-dump
+if [ -f "repo-dump.go" ]; then
+    echo "🔨 Compiling repo-dump..."
+    go build -o "$BIN_DIR/repo-dump" repo-dump.go
+    echo "✅ Installed: repo-dump"
+fi
+
+# 3. Compile release-trigger
+if [ -f "trigger-release.go" ]; then
+    echo "🔨 Compiling release-trigger..."
+    go build -o "$BIN_DIR/release-trigger" trigger-release.go
+    echo "✅ Installed: release-trigger"
+fi
+
+# 4. Create/Update ~/.common_profile
+# We check if the PATH export already exists to avoid duplicates
+if ! grep -q "$BIN_DIR" "$COMMON_PROFILE" 2>/dev/null; then
+    echo "" >> "$COMMON_PROFILE"
+    echo "# Shared Environment Variables" >> "$COMMON_PROFILE"
+    echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$COMMON_PROFILE"
+    echo "✅ Created/Updated $COMMON_PROFILE"
+else
+    echo "🔗 $COMMON_PROFILE already configured."
+fi
+
+# 5. Link to Shell Configs
+# Function to safely append the source command
+link_shell_config() {
+    local rc_file="$1"
+    local source_cmd="[ -f \"$COMMON_PROFILE\" ] && source \"$COMMON_PROFILE\""
+    
+    if [ -f "$rc_file" ]; then
+        if ! grep -q "common_profile" "$rc_file"; then
+            echo "" >> "$rc_file"
+            echo "# Source shared configuration" >> "$rc_file"
+            echo "$source_cmd" >> "$rc_file"
+            echo "🔗 Linked to $rc_file"
+        else
+            echo "🔗 $rc_file already linked."
+        fi
+    fi
+}
+
+link_shell_config "$HOME/.bashrc"
+link_shell_config "$HOME/.zshrc"
+
+echo "🎉 Setup Complete!"
+echo "👉 Run 'source ~/.zshrc' to apply changes immediately."
+
+
+========== FILE: deprecated/trigger-release.sh ==========
+#!/bin/bash
+
+# Ensure we are in a git repo
+if [ ! -d ".git" ]; then
+    echo "❌ Error: Not a git repository."
+    exit 1
+fi
+
+# Fetch tags to ensure we have the latest list
+git fetch --tags > /dev/null 2>&1
+
+# Get the latest tag, default to v0.0.0 if none exists
+LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+
+# Logic to increment Semantic Version (vX.Y.Z -> vX.Y.Z+1)
+VERSION=${LATEST_TAG#v}
+IFS='.' read -r -a PARTS <<< "$VERSION"
+MAJOR=${PARTS[0]}
+MINOR=${PARTS[1]}
+PATCH=${PARTS[2]}
+NEW_PATCH=$((PATCH + 1))
+NEW_TAG="v$MAJOR.$MINOR.$NEW_PATCH"
+
+echo "🚀 Release Trigger"
+echo "------------------"
+echo "Current Version: $LATEST_TAG"
+echo "Next Version:    $NEW_TAG"
+echo ""
+read -p "Push release $NEW_TAG? [y/N] " -n 1 -r
+echo ""
+
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "📦 Tagging release..."
+    git tag -a "$NEW_TAG" -m "Release $NEW_TAG via CLI"
+    
+    echo "⬆️  Pushing to origin..."
+    git push origin "$NEW_TAG"
+    
+    echo "✅ Done! GitHub Action triggered."
+else
+    echo "❌ Cancelled."
+fi
+
+
+========== FILE: paste-to-file.go ==========
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+)
+
+func main() {
+	// 1. Check for filename argument
+	if len(os.Args) < 2 {
+		fmt.Println("❌ Usage: paste-to-file <filename>")
+		os.Exit(1)
+	}
+
+	targetFile := os.Args[1]
+
+	// 2. Get Clipboard Content
+	// We use the Termux API command
+	cmd := exec.Command("termux-clipboard-get")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("❌ Failed to get clipboard. Is Termux API installed?\nError: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(output) == 0 {
+		fmt.Println("⚠️  Clipboard is empty.")
+		return
+	}
+
+	// 3. Write to File (Truncate/Overwrite)
+	// 0644 means readable by user, writable by user, readable by group/others
+	err = os.WriteFile(targetFile, output, 0644)
+	if err != nil {
+		fmt.Printf("❌ Failed to write to file: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 4. Success Message
+	absPath, _ := filepath.Abs(targetFile)
+	fmt.Printf("✅ Clipboard content (%d bytes) saved to:\n   %s\n", len(output), absPath)
+}
+
+
+========== FILE: setup_devtools.go ==========
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("❌ Could not determine home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	binDir := filepath.Join(homeDir, "bin")
+	commonProfile := filepath.Join(homeDir, ".common_profile")
+
+	fmt.Println("🔧 Setting up Termux DevTools (Go Edition)...")
+
+	// 1. Create ~/bin if missing
+	if _, err := os.Stat(binDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			fmt.Printf("❌ Failed to create %s: %v\n", binDir, err)
+			os.Exit(1)
+		}
+		fmt.Printf("📁 Created %s\n", binDir)
+	}
+
+	// 2. Compile Tools
+	compileTool("repo-dump.go", filepath.Join(binDir, "repo-dump"))
+	compileTool("trigger-release.go", filepath.Join(binDir, "release-trigger"))
+	compileTool("paste-to-file.go", filepath.Join(binDir, "paste-to-file"))
+
+	// 3. Configure ~/.common_profile (Idempotent)
+	configureCommonProfile(commonProfile, binDir)
+
+	// 4. Link Shell Configs (Idempotent)
+	linkShellConfig(filepath.Join(homeDir, ".bashrc"), commonProfile)
+	linkShellConfig(filepath.Join(homeDir, ".zshrc"), commonProfile)
+
+	fmt.Println("🎉 Setup Complete!")
+	fmt.Println("👉 Run 'source ~/.zshrc' (or bashrc) to apply changes.")
+}
+
+// Helper: Compile a Go source file to the destination binary
+func compileTool(srcFile, destPath string) {
+	if _, err := os.Stat(srcFile); os.IsNotExist(err) {
+		// Silently skip if source file isn't present (e.g., if you only have one tool)
+		return
+	}
+
+	fmt.Printf("🔨 Compiling %s...\n", filepath.Base(destPath))
+	cmd := exec.Command("go", "build", "-o", destPath, srcFile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("❌ Failed to compile %s: %v\n", srcFile, err)
+	} else {
+		fmt.Printf("✅ Installed: %s\n", filepath.Base(destPath))
+	}
+}
+
+// Helper: Create or update ~/.common_profile
+func configureCommonProfile(profilePath, binDir string) {
+	content := fmt.Sprintf(`
+# Shared Environment Variables
+export PATH="%s:$PATH"
+`, binDir)
+
+	// Check if file contains the bin path already
+	if fileContains(profilePath, binDir) {
+		fmt.Printf("⏭️  Skipping %s (already configured).\n", filepath.Base(profilePath))
+		return
+	}
+
+	appendToFile(profilePath, content)
+	fmt.Printf("✅ Updated %s\n", filepath.Base(profilePath))
+}
+
+// Helper: Link rc files to common profile
+func linkShellConfig(rcPath, commonProfile string) {
+	// If the shell config file doesn't exist, skip it
+	if _, err := os.Stat(rcPath); os.IsNotExist(err) {
+		return
+	}
+
+	sourceCmd := fmt.Sprintf(`[ -f "%s" ] && source "%s"`, commonProfile, commonProfile)
+	checkStr := ".common_profile" // Simple string to check for existence
+
+	if fileContains(rcPath, checkStr) {
+		fmt.Printf("⏭️  Skipping %s (already linked).\n", filepath.Base(rcPath))
+		return
+	}
+
+	appendBlock := fmt.Sprintf("\n# Source shared configuration\n%s\n", sourceCmd)
+	appendToFile(rcPath, appendBlock)
+	fmt.Printf("✅ Linked %s\n", filepath.Base(rcPath))
+}
+
+// Add this call inside main():
+// injectReloadFunction(commonProfile)
+
+func injectReloadFunction(profilePath string) {
+	// This is the shell function we want to inject.
+	// It detects the shell and sources the right file.
+	reloadFunc := `
+# Auto-detect shell and source the rc file
+reload() {
+    local shell_name=$(basename "$SHELL")
+    local rc_file="$HOME/.${shell_name}rc"
+
+    if [ -f "$rc_file" ]; then
+        source "$rc_file"
+        echo "♻️  Reloaded configuration ($rc_file)"
+    else
+        echo "❌ Could not determine config for $shell_name"
+    fi
+}
+`
+	if fileContains(profilePath, "reload()") {
+		fmt.Printf("⏭️  Skipping reload function (already exists).\n")
+		return
+	}
+
+	appendToFile(profilePath, reloadFunc)
+	fmt.Printf("✅ Injected 'reload' function into %s\n", filepath.Base(profilePath))
+}
+
+// Utility: Check if file contains a string
+func fileContains(path, search string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false // Treat read errors as "not found"
+	}
+	return strings.Contains(string(data), search)
+}
+
+// Utility: Append string to file
+func appendToFile(path, content string) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("❌ Failed to open %s: %v\n", path, err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		fmt.Printf("❌ Failed to write to %s: %v\n", path, err)
+	}
+}
+
+
+========== FILE: trigger-release.go ==========
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+)
+
+func main() {
+	// 1. Ensure we are in a git repo
+	if _, err := os.Stat(".git"); os.IsNotExist(err) {
+		fmt.Println("❌ Error: Not a git repository.")
+		os.Exit(1)
+	}
+
+	fmt.Println("🔄 Fetching latest tags...")
+	exec.Command("git", "fetch", "--tags").Run()
+
+	// 2. Get the latest tag
+	cmd := exec.Command("git", "describe", "--tags", "--abbrev=0")
+	output, err := cmd.Output()
+	
+	currentTag := "v0.0.0"
+	if err == nil {
+		currentTag = strings.TrimSpace(string(output))
+	}
+
+	// 3. Parse Semantic Version (vX.Y.Z)
+	// Remove 'v' prefix
+	version := strings.TrimPrefix(currentTag, "v")
+	parts := strings.Split(version, ".")
+
+	var major, minor, patch int
+
+	if len(parts) >= 3 {
+		major, _ = strconv.Atoi(parts[0])
+		minor, _ = strconv.Atoi(parts[1])
+		patch, _ = strconv.Atoi(parts[2])
+	}
+
+	// 4. Increment Patch Version
+	newPatch := patch + 1
+	nextTag := fmt.Sprintf("v%d.%d.%d", major, minor, newPatch)
+
+	// 5. User Confirmation
+	fmt.Println("🚀 Release Trigger")
+	fmt.Println("------------------")
+	fmt.Printf("Current Version: %s\n", currentTag)
+	fmt.Printf("Next Version:    %s\n\n", nextTag)
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("Push release %s? [y/N]: ", nextTag)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(strings.ToLower(input))
+
+	if input == "y" || input == "yes" {
+		fmt.Println("📦 Tagging release...")
+		if err := exec.Command("git", "tag", "-a", nextTag, "-m", "Release "+nextTag).Run(); err != nil {
+			fmt.Printf("❌ Failed to create tag: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("⬆️  Pushing to origin...")
+		if err := exec.Command("git", "push", "origin", nextTag).Run(); err != nil {
+			fmt.Printf("❌ Failed to push tag: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("✅ Done! GitHub Action triggered.")
+	} else {
+		fmt.Println("❌ Cancelled.")
+	}
+}
+
